@@ -21,10 +21,30 @@ and run one command.
 
 ## Use a module
 
-You need Regulus 0.2.1 or newer, `python3` (3.11 or newer for `catalog.py`; modules need
-3.9 or newer and only the standard library) and git.
+You need:
+
+- **Regulus 0.2.1 or newer** (the CLI, `regulus`, or the desktop app).
+- **An existing Regulus project**: a folder that contains a `regulus.toml`. `catalog.py`
+  installs *into* a project and refuses a folder without that file; it does not create
+  projects. Already have one? Use its folder and skip step 2.
+- `git` and `python3` 3.11 or newer for `catalog.py` (the modules themselves need Python
+  3.9 or newer and only the standard library).
+
+Installing only copies files, so it needs no running core. Opening, trusting and
+reloading a project are `regulus project …` commands, which talk to a **running core**.
+In this example the project is `~/my-project`; its id is `my-project`.
 
 ```sh
+# 1. Terminal A: start the core and leave it running.
+regulus serve
+
+# 2. Terminal B: make the folder a project. It must exist; this writes a minimal
+#    regulus.toml if there is none, and does not trust the folder.
+mkdir -p ~/my-project
+regulus project open ~/my-project
+regulus project ls                      # first column: the project id (my-project)
+
+# 3. Get the catalogue and install a module into the project.
 git clone https://github.com/Solar2004/regulus-modules
 cd regulus-modules
 python3 catalog.py show text-extract
@@ -32,22 +52,31 @@ python3 catalog.py install text-extract --project ~/my-project
 ```
 
 The module does not run yet. Read `~/my-project/tools/text-extract/run.py`, then trust the
-project and, if the core already has it open, reload the module:
+project and load the module:
 
 ```sh
+# 4. Trusting lets the project's local modules run, as you; there is no sandbox.
 regulus project trust ~/my-project
-regulus project reload <project id> --module text-extract
+regulus project reload my-project --module text-extract
+regulus module ls                       # my-project/text-extract@0.1.0   idle
 ```
 
-Its nodes then show up in the app's palette (module id `<project id>/text-extract`).
-`install` prints the exact commands, with your project's id, and never trusts a project
-for you.
+The project id is the first column of `regulus project ls`: the folder's name, unless its
+`regulus.toml` sets `[project] id`. Wherever these docs write `<project-id>`, put your
+project's id there, without the angle brackets. Its nodes then show up in the app's palette
+(module id `<project-id>/text-extract`). `install` prints the trust and reload commands
+with your project's real path and id filled in, and never trusts a project for you.
 
-To remove it:
+**In the desktop app** instead of the CLI: open the folder there (**New Python node →
+Open a project folder…** opens it untrusted, and writes a `regulus.toml` if there is
+none), run the `catalog.py install` command from a terminal, then trust the project and
+reload the module from **Settings → Modules**.
+
+To remove it (`remove` only edits files, so it needs no core; the reload does):
 
 ```sh
 python3 catalog.py remove text-extract --project ~/my-project
-regulus project reload <project id>        # if the core has the project open
+regulus project reload my-project       # if the core has the project open
 ```
 
 ## What install and remove do, and do not

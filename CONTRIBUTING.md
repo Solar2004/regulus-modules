@@ -74,11 +74,17 @@ the module over stdin/stdout the way the core does.
 Then try it in a real project (a throwaway one is best):
 
 ```sh
+regulus serve                                           # in another terminal, left running
+mkdir -p /tmp/try && regulus project open /tmp/try      # writes regulus.toml; id: try
 python3 catalog.py install my-tool --project /tmp/try   # after step 4
 regulus project trust /tmp/try
-regulus project reload <project id> --module my-tool    # or open the project
-regulus module show <project id>/my-tool
+regulus project reload try --module my-tool
+regulus module show try/my-tool
 ```
+
+`install` needs an existing project (a folder with a `regulus.toml`) and the `regulus
+project` commands need the running core; the [README](README.md#use-a-module) explains
+both. In other projects, `<project-id>` is the first column of `regulus project ls`.
 
 ## 4. List its files and checksums
 

@@ -63,13 +63,18 @@ language = ""      pick = "first"    →  out: "make test\n"     count: 1
 
 ## In a project
 
+Into an existing Regulus project (a folder with a `regulus.toml`; the
+[top-level README](../../README.md#use-a-module) has the full setup, including the core
+that must be running for the `regulus project` commands):
+
 ```sh
-python3 catalog.py install text-extract --project <project folder>
-regulus project trust <project folder>
+python3 catalog.py install text-extract --project <project-folder>
+regulus project trust <project-folder>
+regulus project reload <project-id> --module text-extract
 ```
 
 Its nodes then show up in the app's palette. In a profile file they are
-`module_id = "<project id>/text-extract"` with `type = "extract_json"` or
+`module_id = "<project-id>/text-extract"` with `type = "extract_json"` or
 `type = "code_blocks"`.
 
 ## Limits
