@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""regulus-modules: list, show, install and remove the Python modules of this catalogue.
+"""regulus-modules: list, show, install and remove the modules of this catalogue.
 
 Python 3.11 or newer, standard library only. It works on this clone and on a project
 folder: it copies files and adds or removes one marked block of the project's
@@ -13,8 +13,10 @@ project.
     python3 catalog.py check            # for contributors and CI
 
 An installed module is a Regulus local module laid out like `regulus node init` lays one
-out: `tools/<id>/run.py` with the Python SDK beside it and a `[[modules.local]]` entry.
-Regulus starts it only once the project is trusted (`regulus project trust <folder>`).
+out, with a `[[modules.local]]` entry: a Python one is `tools/<id>/run.py` with the Python
+SDK beside it; a Rust one (`lang = "rust"` in its module.toml) is a crate in `tools/<id>/`
+with the Rust helper as `src/regulus.rs`, which `regulus node build` compiles. Regulus
+starts it only once the project is trusted (`regulus project trust <folder>`).
 """
 import sys
 
@@ -28,6 +30,7 @@ import importlib.util  # noqa: E402
 import json  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
+import shutil  # noqa: E402
 import stat  # noqa: E402
 import tomllib  # noqa: E402
 from dataclasses import dataclass  # noqa: E402
@@ -46,6 +49,28 @@ TOOLS_DIR = "tools"
 RUN_FILE = "run.py"
 SDK_FILE = "regulus.py"
 PYTHON = "python3"
+# A module's language: what its files are and how the project runs it.
+LANG_PYTHON = "python"
+LANG_RUST = "rust"
+LANGS = (LANG_PYTHON, LANG_RUST)
+# A Rust module is a crate, as `regulus node init --lang rust` writes one: the helper that
+# speaks the protocol is added as src/regulus.rs, `regulus node build` compiles the crate
+# into target/, and the program is named after the module.
+CARGO_FILE = "Cargo.toml"
+MANIFEST_FILE = "regulus-module.toml"
+RUST_MAIN = "src/main.rs"
+RUST_SDK_FILE = "regulus.rs"
+RUST_SDK_PATH = "src/regulus.rs"
+BUILD_DIR = "target"
+RUST_PROGRAM = "node-{id}"
+# The files a module of each language must list.
+REQUIRED_FILES = {LANG_PYTHON: (RUN_FILE,), LANG_RUST: (CARGO_FILE, MANIFEST_FILE, RUST_MAIN)}
+# The file to read before trusting a project with the module.
+MAIN_FILE = {LANG_PYTHON: RUN_FILE, LANG_RUST: RUST_MAIN}
+# The one hidden file a crate may bring (it keeps target/ out of the project's git).
+GITIGNORE = ".gitignore"
+# How many folders deep a file of a crate may be.
+MAX_FILE_DEPTH = 3
 # What this tool leaves in an installed module's folder, to know the module later.
 RECEIPT = ".regulus-modules.json"
 CACHE_DIR = "__pycache__"
@@ -111,6 +136,8 @@ class Sdk:
     version: str
     sha256: str
     origin: str
+    path: str  # where it goes in an installed module
+    name: str  # what it is, for people
 
 
 @dataclass
@@ -121,26 +148,68 @@ class Module:
     summary: str
     license: str
     tested_with: str
-    files: dict  # file name -> sha256, in the order of module.toml
+    files: dict  # file path -> sha256, in the order of module.toml
     folder: Path
+    lang: str = LANG_PYTHON
 
 
-def load_sdk(root=ROOT):
-    """The one copy of the Regulus Python SDK, checked against `catalog.toml` [sdk]."""
+def load_sdk(root=ROOT, lang=LANG_PYTHON):
+    """The one copy of the Regulus SDK of `lang`, checked against `catalog.toml`: the
+    Python SDK against [sdk], the Rust helper against [sdk.rust]."""
     table = read_toml(root / CATALOG_FILE, CATALOG_FILE).get("sdk")
     if not isinstance(table, dict):
         raise Refused(f"{CATALOG_FILE} has no [sdk] table")
+    file_name, said_in = SDK_FILE, "[sdk]"
+    if lang == LANG_RUST:
+        file_name, said_in, table = RUST_SDK_FILE, "[sdk.rust]", table.get("rust")
+        if not isinstance(table, dict):
+            raise Refused(f"{CATALOG_FILE} has no [sdk.rust] table")
     if not real_dir(root / SDK_DIR):
         raise Refused(f"{SDK_DIR}/ must be a folder of this clone, not a link")
-    data = regular_file(root / SDK_DIR / SDK_FILE, f"{SDK_DIR}/{SDK_FILE}")
+    data = regular_file(root / SDK_DIR / file_name, f"{SDK_DIR}/{file_name}")
     want, got = table.get("sha256"), sha256(data)
     if got != want:
-        raise Refused(f"{SDK_DIR}/{SDK_FILE}: sha256 is {got}, {CATALOG_FILE} says {want}")
-    said = SDK_VERSION.search(data)
+        raise Refused(f"{SDK_DIR}/{file_name}: sha256 is {got}, {CATALOG_FILE} {said_in} "
+                      f"says {want}")
     version = table.get("version")
+    if not isinstance(version, str) or not version:
+        raise Refused(f"{CATALOG_FILE} {said_in} has no version")
+    origin = str(table.get("origin", ""))
+    if lang == LANG_RUST:  # the helper carries no version: it is the one of that release
+        return Sdk(data, version, got, origin, RUST_SDK_PATH, "Regulus Rust helper")
+    said = SDK_VERSION.search(data)
     if not said or said.group(1).decode() != version:
         raise Refused(f"{SDK_DIR}/{SDK_FILE} is not version {version}, as {CATALOG_FILE} says")
-    return Sdk(data, version, got, str(table.get("origin", "")))
+    return Sdk(data, version, got, origin, SDK_FILE, "Regulus Python SDK")
+
+
+def file_path_problem(file_name, lang):
+    """Why `file_name` cannot be a file of a module of `lang`, or None if it can."""
+    if not isinstance(file_name, str):
+        return "must be a string"
+    if lang == LANG_PYTHON:
+        if not PLAIN_NAME.fullmatch(file_name) or file_name in (SDK_FILE, CACHE_DIR):
+            return (f"must be a file name in the module's folder: no `/`, no leading `.`, "
+                    f"not {SDK_FILE} (the SDK is added)")
+        return None
+    parts = file_name.split("/")
+    plain = all(PLAIN_NAME.fullmatch(part) for part in parts[:-1]) and (
+        PLAIN_NAME.fullmatch(parts[-1]) or parts[-1] == GITIGNORE)
+    if not plain or len(parts) > MAX_FILE_DEPTH + 1:
+        return (f"must be a path inside the module's folder, at most {MAX_FILE_DEPTH} folders "
+                f"deep: plain names, no `..`, nothing hidden but {GITIGNORE}")
+    if file_name == RUST_SDK_PATH or parts[0] == BUILD_DIR:
+        return f"must not be {RUST_SDK_PATH} (the helper is added) or in {BUILD_DIR}/ (the build)"
+    return None
+
+
+def folders_of(file_names):
+    """The folders that hold `file_names`, each as a relative path, outermost first."""
+    found = set()
+    for file_name in file_names:
+        parts = file_name.split("/")[:-1]
+        found.update("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+    return sorted(found, key=lambda folder: (folder.count("/"), folder))
 
 
 def module_ids(root=ROOT):
@@ -176,6 +245,10 @@ def load_module(folder, expect_id=None):
         problems.append(f"`id` is `{module_id}` but the folder is `{expect_id}`")
     if version and not VERSION.fullmatch(version):
         problems.append(f"`version` {version!r} must look like 1.2.3")
+    lang = data.get("lang", LANG_PYTHON)
+    if lang not in LANGS:
+        problems.append(f"`lang` {lang!r} must be one of {', '.join(LANGS)}")
+        lang = LANG_PYTHON
     files = {}
     entries = data.get("file")
     if not isinstance(entries, list) or not entries:
@@ -184,21 +257,22 @@ def load_module(folder, expect_id=None):
     for entry in entries:
         file_name = entry.get("path") if isinstance(entry, dict) else None
         digest = entry.get("sha256") if isinstance(entry, dict) else None
-        if not isinstance(file_name, str) or not PLAIN_NAME.fullmatch(file_name) \
-                or file_name in (SDK_FILE, CACHE_DIR):
-            problems.append(f"[[file]] path {file_name!r} must be a file name in the module's "
-                            f"folder: no `/`, no leading `.`, not {SDK_FILE} (the SDK is added)")
+        problem = file_path_problem(file_name, lang)
+        if problem:
+            problems.append(f"[[file]] path {file_name!r} {problem}")
         elif file_name in files:
             problems.append(f"[[file]] {file_name} is listed twice")
         elif not isinstance(digest, str) or not SHA256.fullmatch(digest):
             problems.append(f"[[file]] {file_name}: sha256 must be 64 lowercase hex digits")
         else:
             files[file_name] = digest
-    if entries and RUN_FILE not in files:
-        problems.append(f"[[file]] must list {RUN_FILE}, the program Regulus runs")
+    for required in REQUIRED_FILES[lang]:
+        if entries and required not in files:
+            problems.append(f"[[file]] must list {required}: a {lang} module needs it")
     if problems:
         raise Refused(f"{folder.name}/{MODULE_FILE}:\n{bullets(problems)}")
-    return Module(module_id, name, version, summary, license_id, tested_with, files, folder)
+    return Module(module_id, name, version, summary, license_id, tested_with, files, folder,
+                  lang)
 
 
 def find_module(module_id, root=ROOT):
@@ -233,6 +307,64 @@ def inspect_nodes(source, root=ROOT):
     sdk = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sdk)
     return sdk.inspect(source)
+
+
+def rust_program(module_id):
+    """The Cargo package, and so the program, of a Rust module: what `regulus node build`
+    expects to have built."""
+    return RUST_PROGRAM.format(id=module_id)
+
+
+def rust_crate(module, payload):
+    """The node types a Rust module declares in its `regulus-module.toml`, and what in the
+    crate would not build into the program Regulus runs (a list of problems)."""
+    where = f"{module.folder.name}/"
+    problems = []
+
+    def table_of(file_name):
+        try:
+            return parse_toml(payload[file_name].decode("utf-8"), where + file_name)
+        except (Refused, UnicodeDecodeError) as error:
+            problems.append(str(error))
+            return {}
+
+    cargo, manifest = table_of(CARGO_FILE), table_of(MANIFEST_FILE)
+    package = cargo.get("package") if isinstance(cargo.get("package"), dict) else {}
+    if package.get("name") != rust_program(module.id):
+        problems.append(f"{where}{CARGO_FILE}: the package must be named "
+                        f"`{rust_program(module.id)}`, the program `regulus node build` expects")
+    if package.get("version") != module.version:
+        problems.append(f"{where}{CARGO_FILE}: the package's version must be {module.version}, "
+                        f"as {MODULE_FILE} says")
+    if "workspace" not in cargo:
+        problems.append(f"{where}{CARGO_FILE}: it needs an empty [workspace] table, so a Cargo "
+                        "workspace above the project does not adopt the crate")
+    declared = manifest.get("module") if isinstance(manifest.get("module"), dict) else {}
+    said = declared.get("id")
+    if isinstance(said, str) and "@" in said and said.rsplit("@", 1)[1] != module.version:
+        problems.append(f"{where}{MANIFEST_FILE}: the module id says version "
+                        f"{said.rsplit('@', 1)[1]}, {MODULE_FILE} says {module.version}")
+    nodes = manifest.get("node")
+    good = isinstance(nodes, list) and nodes and all(
+        isinstance(node, dict) and isinstance(node.get("type"), str)
+        and all(isinstance(port, dict) and all(isinstance(port.get(key), str) for key in
+                                               ("id", "capability", "direction"))
+                for port in node.get("port", []))
+        and all(isinstance(field, dict) and isinstance(field.get("id"), str)
+                for field in node.get("field", []))
+        for node in nodes)
+    if not good:
+        problems.append(f"{where}{MANIFEST_FILE}: it must declare at least one [[node]] with a "
+                        "type, and ports with id, capability and direction")
+        nodes = []
+    return nodes, problems
+
+
+def node_types(module, payload, root=ROOT):
+    """The node types of a module, read without running or building it."""
+    if module.lang == LANG_RUST:
+        return rust_crate(module, payload)[0]
+    return [found["node"] for found in inspect_nodes(payload[RUN_FILE], root)["nodes"]]
 
 
 # --- the project ------------------------------------------------------------------------
@@ -280,8 +412,11 @@ def local_entries(table):
 
 
 def entry_of(module):
-    return {"id": module.id, "command": [PYTHON, f"{TOOLS_DIR}/{module.id}/{RUN_FILE}"],
-            "version": module.version}
+    if module.lang == LANG_RUST:  # where `regulus node build` leaves the program
+        command = [f"{TOOLS_DIR}/{module.id}/{BUILD_DIR}/release/{rust_program(module.id)}"]
+    else:
+        command = [PYTHON, f"{TOOLS_DIR}/{module.id}/{RUN_FILE}"]
+    return {"id": module.id, "command": command, "version": module.version}
 
 
 def block_of(module):
@@ -367,10 +502,11 @@ def undo(created):
 class Receipt:
     module: str
     version: str
-    files: dict  # file name -> sha256, the SDK included
+    files: dict  # file path -> sha256, the SDK included
     added: str  # the exact text added to regulus.toml
     entry: dict
     created_tools: bool
+    lang: str = LANG_PYTHON
 
     @property
     def block(self):
@@ -384,8 +520,8 @@ def install(module_id, folder, root=ROOT):
     change; if anything fails, what was created is removed."""
     module = find_module(module_id, root)
     payload = module_payload(module)
-    sdk = load_sdk(root)
-    payload[SDK_FILE] = sdk.data
+    sdk = load_sdk(root, module.lang)
+    payload[sdk.path] = sdk.data
     project = open_project(folder)
     if any(entry.get("id") == module.id for entry in local_entries(project.table)):
         raise Refused(f"{PROJECT_FILE} already has a [[modules.local]] with id `{module.id}`; "
@@ -417,6 +553,7 @@ def install(module_id, folder, root=ROOT):
         "catalog": "regulus-modules",
         "module": module.id,
         "version": module.version,
+        "lang": module.lang,
         "files": {name: sha256(data) for name, data in payload.items()},
         "sdk": {"version": sdk.version, "origin": sdk.origin},
         "regulus_toml": {"added": added, "entry": entry_of(module)},
@@ -429,6 +566,9 @@ def install(module_id, folder, root=ROOT):
             created.append(tools)
         os.mkdir(target)
         created.append(target)
+        for inner in folders_of(payload):
+            os.mkdir(target / inner)
+            created.append(target / inner)
         for file_name, data in payload.items():
             created.append(target / file_name)
             write_new(target / file_name, data)
@@ -451,14 +591,17 @@ def read_receipt(folder, module_id):
         raw = json.loads(regular_file(path, RECEIPT))
         files, toml = raw["files"], raw["regulus_toml"]
         receipt = Receipt(raw["module"], raw["version"], dict(files), toml["added"],
-                          toml["entry"], raw["created_tools"])
+                          toml["entry"], raw["created_tools"], raw.get("lang", LANG_PYTHON))
     except (ValueError, KeyError, TypeError, AttributeError):
         raise Refused(f"{TOOLS_DIR}/{module_id}/{RECEIPT} is not what catalog.py writes; "
                       "nothing was removed") from None
     good = (
         receipt.module == module_id
-        and all(isinstance(n, str) and PLAIN_NAME.fullmatch(n) and isinstance(d, str)
-                and SHA256.fullmatch(d) for n, d in receipt.files.items())
+        and receipt.lang in LANGS
+        and all(isinstance(n, str) and isinstance(d, str) and SHA256.fullmatch(d)
+                and (n == (RUST_SDK_PATH if receipt.lang == LANG_RUST else SDK_FILE)
+                     or file_path_problem(n, receipt.lang) is None)
+                for n, d in receipt.files.items())
         and isinstance(receipt.added, str)
         and receipt.block.startswith(BEGIN.format(id=module_id))
         and isinstance(receipt.entry, dict) and receipt.entry.get("id") == module_id
@@ -485,8 +628,9 @@ def only_bytecode(folder, stems):
 
 def remove(module_id, folder):
     """Removes a module this tool installed: its files and its block of `regulus.toml`, only
-    if none of them changed and the folder holds nothing else (but Python's bytecode cache).
-    Otherwise refuses and changes nothing."""
+    if none of them changed and the folder holds nothing else (but Python's bytecode cache,
+    or the `target/` a Rust module was built into, which go with it). Otherwise refuses and
+    changes nothing."""
     if not ID.fullmatch(module_id):
         raise Refused(f"`{module_id}` is not a module id")
     project = open_project(folder)
@@ -495,23 +639,35 @@ def remove(module_id, folder):
     if not real_dir(tools) or not real_dir(target):
         raise Refused(f"{project.root} has no folder {TOOLS_DIR}/{module_id}; nothing was removed")
     receipt = read_receipt(target, module_id)
-    problems, present, cache = [], [], False
+    problems, present, derived = [], [], set()
     stems = {name[:-3] for name in receipt.files if name.endswith(".py")}
-    for entry in sorted(os.scandir(target), key=lambda e: e.name):
-        shown = f"{TOOLS_DIR}/{module_id}/{entry.name}"
-        if entry.name == RECEIPT:
-            continue
-        if entry.name in receipt.files:
-            if not entry.is_file(follow_symlinks=False):
-                problems.append(f"{shown} is no longer a regular file")
-            elif sha256(Path(entry.path).read_bytes()) != receipt.files[entry.name]:
-                problems.append(f"{shown} changed since it was installed")
+    folders = folders_of(receipt.files)
+
+    def look(folder, prefix):
+        for entry in sorted(os.scandir(folder), key=lambda e: e.name):
+            name = prefix + entry.name
+            shown = f"{TOOLS_DIR}/{module_id}/{name}"
+            if name == RECEIPT:
+                continue
+            if name in receipt.files:
+                if not entry.is_file(follow_symlinks=False):
+                    problems.append(f"{shown} is no longer a regular file")
+                elif sha256(Path(entry.path).read_bytes()) != receipt.files[name]:
+                    problems.append(f"{shown} changed since it was installed")
+                else:
+                    present.append(name)
+            elif name in folders and entry.is_dir(follow_symlinks=False):
+                look(entry.path, name + "/")
+            elif receipt.lang == LANG_PYTHON and name == CACHE_DIR \
+                    and only_bytecode(Path(entry.path), stems):
+                derived.add(CACHE_DIR)
+            elif receipt.lang == LANG_RUST and name == BUILD_DIR \
+                    and entry.is_dir(follow_symlinks=False):
+                derived.add(BUILD_DIR)  # what `regulus node build` made of these files
             else:
-                present.append(entry.name)
-        elif entry.name == CACHE_DIR and only_bytecode(Path(entry.path), stems):
-            cache = True
-        else:
-            problems.append(f"{shown} was not installed by catalog.py")
+                problems.append(f"{shown} was not installed by catalog.py")
+
+    look(target, "")
     after = None
     begin = BEGIN.format(id=module_id)
     ours = [e for e in local_entries(project.table) if e.get("id") == module_id]
@@ -548,12 +704,14 @@ def remove(module_id, folder):
         raise
     for file_name in [*present, RECEIPT]:
         (aside / file_name).unlink()
-    if cache:
+    if CACHE_DIR in derived:
         for entry in os.scandir(aside / CACHE_DIR):
             if BYTECODE.fullmatch(entry.name):
                 os.unlink(entry.path)
+    if BUILD_DIR in derived:
+        shutil.rmtree(aside / BUILD_DIR)
     kept = []
-    for path in (aside / CACHE_DIR, aside):
+    for path in (aside / CACHE_DIR, *(aside / inner for inner in reversed(folders)), aside):
         try:
             if os.path.lexists(path):
                 path.rmdir()
@@ -585,14 +743,16 @@ def describe_port(port):
 def command_show(args):
     module = find_module(args.module)
     payload = module_payload(module)
-    sdk = load_sdk()
+    sdk = load_sdk(lang=module.lang)
+    kind = (f"Rust local module (helper of Regulus {sdk.version}), built with "
+            "`regulus node build`," if module.lang == LANG_RUST
+            else f"Python local module (SDK {sdk.version}),")
     print(f"{module.id} {module.version} - {module.name}")
     print(module.summary)
     print(f"license {module.license} · tested with Regulus {module.tested_with} · "
-          f"Python local module (SDK {sdk.version}), runs only in a trusted project")
+          f"{kind} runs only in a trusted project")
     print("\nnode types (module_id \"<project>/" + module.id + "\"):")
-    for found in inspect_nodes(payload[RUN_FILE])["nodes"]:
-        node = found["node"]
+    for node in node_types(module, payload):
         ports = node.get("port", [])
         print(f"  {node['type']}  ({node.get('name', '')})")
         print("    in:     " + ", ".join(describe_port(p) for p in ports
@@ -600,13 +760,15 @@ def command_show(args):
         print("    out:    " + ", ".join(describe_port(p) for p in ports
                                          if p["direction"] == "output"))
         for field in node.get("field", []):
-            options = f", one of {', '.join(field['options'])}" if field.get("options") else ""
+            options = (f", one of {', '.join(map(str, field['options']))}"
+                       if field.get("options") else "")
             print(f"    field:  {field['id']} ({field.get('type', 'text')}, default "
                   f"{json.dumps(field.get('default'))}{options})")
     print("\nfiles installed into tools/" + module.id + "/ (sha256):")
+    width = max(map(len, [*module.files, sdk.path]))
     for file_name, digest in module.files.items():
-        print(f"  {file_name:<12} {digest}")
-    print(f"  {SDK_FILE:<12} {sdk.sha256}  (Regulus Python SDK {sdk.version})")
+        print(f"  {file_name:<{width}} {digest}")
+    print(f"  {sdk.path:<{width}} {sdk.sha256}  ({sdk.name} {sdk.version})")
     print(f"\ninstall: python3 catalog.py install {module.id} --project <project folder>")
     print(f"docs:    {MODULES_DIR}/{module.id}/{README}")
 
@@ -618,10 +780,14 @@ def command_install(args):
         print(f"  created {TOOLS_DIR}/{module.id}/{file_name}")
     print(f"  added its [[modules.local]] entry to {PROJECT_FILE} "
           f"(module id {project.id}/{module.id})")
+    build = ""
+    if module.lang == LANG_RUST:
+        build = (f"  regulus node build {project.root} --id {module.id}"
+                 "   # cargo build --release: needs cargo, and the network the first time\n")
     print(f"\nIt does not run yet: Regulus starts a project's local modules only once the project "
           f"is trusted,\nwith your user's permissions (no sandbox). Read "
-          f"{TOOLS_DIR}/{module.id}/{RUN_FILE}, then:\n"
-          f"  regulus project trust {project.root}\n"
+          f"{TOOLS_DIR}/{module.id}/{MAIN_FILE[module.lang]}, then:\n"
+          f"  regulus project trust {project.root}\n{build}"
           f"  regulus project reload {project.id} --module {module.id}"
           f"   # if the core has it open, else: regulus project open {project.root}")
     print(f"Its node types: python3 catalog.py show {module.id}")
@@ -642,10 +808,12 @@ def command_remove(args):
 
 def command_check(_args, root=ROOT):
     problems = []
-    try:
-        load_sdk(root)
-    except Refused as error:
-        problems.append(str(error))
+    sdks = {}
+    for lang in LANGS:
+        try:
+            sdks[lang] = load_sdk(root, lang)
+        except Refused as error:
+            problems.append(str(error))
     readme = (root / README).read_text("utf-8") if (root / README).is_file() else ""
     ids = module_ids(root)
     if not ids:
@@ -659,11 +827,21 @@ def command_check(_args, root=ROOT):
         except Refused as error:
             problems.append(f"{where}: {error}")
             continue
-        read = inspect_nodes(payload[RUN_FILE], root)
-        errors = [d["message"] for d in read["diagnostics"] if d["severity"] == "error"]
-        if errors or not read["nodes"] or not read["complete"]:
-            problems.append(f"{where}/{RUN_FILE}: the SDK cannot read its node types without "
-                            f"running it (use literal arguments): {errors or read['diagnostics']}")
+        if module.lang == LANG_RUST:
+            problems.extend(rust_crate(module, payload)[1])
+            # In this clone the crate reaches the one copy of the helper through a link, so
+            # `cargo test` works here; install writes the real file in its place.
+            helper, sdk = folder / RUST_SDK_PATH, sdks.get(LANG_RUST)
+            if sdk and not (helper.is_file() and sha256(helper.read_bytes()) == sdk.sha256):
+                problems.append(f"{where}/{RUST_SDK_PATH} must be a link to "
+                                f"{SDK_DIR}/{RUST_SDK_FILE}, the one copy of the helper")
+        else:
+            read = inspect_nodes(payload[RUN_FILE], root)
+            errors = [d["message"] for d in read["diagnostics"] if d["severity"] == "error"]
+            if errors or not read["nodes"] or not read["complete"]:
+                problems.append(
+                    f"{where}/{RUN_FILE}: the SDK cannot read its node types without running "
+                    f"it (use literal arguments): {errors or read['diagnostics']}")
         if not (folder / README).is_file():
             problems.append(f"{where}: has no {README}")
         row = any(f"`{module.id}`" in line and module.version in line
@@ -673,7 +851,7 @@ def command_check(_args, root=ROOT):
     if problems:
         raise Refused(f"check failed:\n{bullets(problems)}")
     print(f"ok: {len(ids)} module(s) and the template match their manifests; "
-          f"SDK {SDK_DIR}/{SDK_FILE} matches {CATALOG_FILE}")
+          f"{SDK_DIR}/{SDK_FILE} and {SDK_DIR}/{RUST_SDK_FILE} match {CATALOG_FILE}")
 
 
 def main(argv=None):

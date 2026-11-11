@@ -9,3 +9,13 @@ version = "0.2.1"
 sha256 = "254039b2204f72f3fa29e98592abad161ce312c4a9e2ef7b69e9fa80cb9b34ac"
 origin = "https://github.com/Solar2004/Regulus/blob/229ffdda7fbaa2d2298a00192ca4a8587d09c4dd/sdk/python/regulus.py"
 license = "Apache-2.0"
+
+# One copy of the official Regulus Rust helper (`serde_json` and the standard library
+# only), installed into every Rust module as src/regulus.rs. Copied unchanged from the
+# Regulus repository at the commit below (release 0.2.1; the file carries no version of its
+# own); Apache-2.0, see NOTICE.
+[sdk.rust]
+version = "0.2.1"
+sha256 = "a995b56316401e1cf3a89940196d3766cfef0359a55b50d29be7b4956d8643f3"
+origin = "https://github.com/Solar2004/Regulus/blob/e20e20b3209a68d9bc2f37db9e7ddb4a32361b86/sdk/rust/regulus.rs"
+license = "Apache-2.0"

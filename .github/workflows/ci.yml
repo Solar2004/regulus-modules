@@ -26,3 +26,8 @@ jobs:
           for dir in tests modules/*/tests template/tests; do
             python -W error::ResourceWarning -m unittest discover -s "$dir" -v || exit 1
           done
+      - name: Test the Rust modules
+        run: |
+          for manifest in modules/*/Cargo.toml; do
+            cargo test --locked --manifest-path "$manifest" || exit 1
+          done

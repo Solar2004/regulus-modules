@@ -1,20 +1,23 @@
 # regulus-modules
 
-Python modules for [Regulus](https://github.com/Solar2004/Regulus), ready to install into a
-project, and the place to share your own.
+Modules for [Regulus](https://github.com/Solar2004/Regulus) that are not part of Regulus
+itself, in Python and in Rust, ready to install into a project, and the place to share
+your own.
 
-Each module is a Regulus **local module** written with the official Python SDK: a
-`run.py` that Regulus starts as a process and talks to over stdin/stdout. Installing one
-copies it into your project's `tools/<id>/` and adds its `[[modules.local]]` entry to
-`regulus.toml`, the same layout `regulus node init` creates. No server, no package
-manager, no download at install time: you clone this repository, read what you install,
-and run one command.
+Each module is a Regulus **local module**: a program that Regulus starts as a process and
+talks to over stdin/stdout. A Python one is a `run.py` written with the official Python
+SDK; a Rust one is a small crate written with the official Rust helper, which you build
+once with `regulus node build`. Installing one copies it into your project's `tools/<id>/`
+and adds its `[[modules.local]]` entry to `regulus.toml`, the same layout
+`regulus node init` creates. No server, no package manager, no download at install time:
+you clone this repository, read what you install, and run one command.
 
 ## Catalogue
 
-| Module | Version | What it does | Node types |
-|---|---|---|---|
-| [`text-extract`](modules/text-extract/README.md) | 0.1.0 | Pulls the JSON value or the fenced code blocks out of a text, such as an agent's reply, so the next node gets data instead of prose. | `extract_json`, `code_blocks` |
+| Module | Version | Language | What it does | Node types |
+|---|---|---|---|---|
+| [`scrapling`](modules/scrapling/README.md) | 0.1.0 | Rust | Fetches a web page with the [Scrapling](https://github.com/D4Vinci/Scrapling) CLI, as a plain request or with its stealth browser, and sends it on as Markdown, HTML or text. Needs Scrapling installed. | `fetch` |
+| [`text-extract`](modules/text-extract/README.md) | 0.1.0 | Python | Pulls the JSON value or the fenced code blocks out of a text, such as an agent's reply, so the next node gets data instead of prose. | `extract_json`, `code_blocks` |
 
 `python3 catalog.py list` prints the same list from your clone, and
 `python3 catalog.py show <id>` prints a module's ports, fields, files and checksums.
@@ -27,8 +30,9 @@ You need:
 - **An existing Regulus project**: a folder that contains a `regulus.toml`. `catalog.py`
   installs *into* a project and refuses a folder without that file; it does not create
   projects. Already have one? Use its folder and skip step 2.
-- `git` and `python3` 3.11 or newer for `catalog.py` (the modules themselves need Python
-  3.9 or newer and only the standard library).
+- `git` and `python3` 3.11 or newer for `catalog.py` (the Python modules themselves need
+  Python 3.9 or newer and only the standard library).
+- For a Rust module only: `cargo`, to build it (see [Rust modules](#rust-modules)).
 
 Installing only copies files, so it needs no running core. Opening, trusting and
 reloading a project are `regulus project …` commands, which talk to a **running core**.
@@ -72,7 +76,28 @@ Open a project folder…** opens it untrusted, and writes a `regulus.toml` if th
 none), run the `catalog.py install` command from a terminal, then trust the project and
 reload the module from **Settings → Modules**.
 
-To remove it (`remove` only edits files, so it needs no core; the reload does):
+### Rust modules
+
+A Rust module (the Language column says so) installs as source: a crate in `tools/<id>/`.
+Regulus runs the program `cargo` builds from it, so there is one more step between trust
+and reload. Building runs the project's code (build scripts), which is why Regulus asks
+for the trust first:
+
+```sh
+python3 catalog.py install scrapling --project ~/my-project
+regulus project trust ~/my-project
+regulus node build ~/my-project --id scrapling     # cargo build --release, into tools/scrapling/target/
+regulus project reload my-project --module scrapling
+regulus module ls                       # my-project/scrapling@0.1.0   idle
+```
+
+It needs `cargo` ([rustup.rs](https://rustup.rs)) and, the first time, the network: the
+crate's one dependency, `serde_json`, comes from crates.io. Until it is built the module
+is listed as `broken` (its program does not exist yet). Nothing is downloaded prebuilt.
+
+### Remove a module
+
+To remove one (`remove` only edits files, so it needs no core; the reload does):
 
 ```sh
 python3 catalog.py remove text-extract --project ~/my-project
@@ -83,8 +108,10 @@ regulus project reload my-project       # if the core has the project open
 
 - **Install** checks every file against the sha256 in the module's `module.toml` and the
   SDK copy against `catalog.toml`, then creates `tools/<id>/` (`run.py`, the SDK as
-  `regulus.py`, and `.regulus-modules.json`, a receipt of what it wrote) and appends one
-  marked block to `regulus.toml`:
+  `regulus.py`, and `.regulus-modules.json`, a receipt of what it wrote; for a Rust
+  module, the crate's files with the helper as `src/regulus.rs`) and appends one marked
+  block to `regulus.toml` (a Rust module's `command` is its built program,
+  `tools/<id>/target/release/node-<id>`):
 
   ```toml
   # >>> regulus-modules: text-extract >>>
@@ -102,7 +129,8 @@ regulus project reload my-project       # if the core has the project open
   is removed. It runs no module code.
 - **Remove** deletes only what install wrote, and only if it is unchanged: the files must
   still match the receipt, the folder may hold nothing else (but Python's
-  `__pycache__`), and the marked block must be intact. Otherwise it refuses and changes
+  `__pycache__`, or the `target/` folder a Rust module was built into, which is deleted
+  with it), and the marked block must be intact. Otherwise it refuses and changes
   nothing, listing what differs. To keep an edited module, copy your changes out first,
   then delete `tools/<id>/` and the marked block by hand. Installing and then removing
   leaves `regulus.toml` exactly as it was.
@@ -121,38 +149,45 @@ would any script. A module's README says what it touches outside its process.
 The checksums prove the files you install are the ones the catalogue lists, not that they
 are safe; they come from the same repository. Review is what makes a module safe to run.
 
-## Custom Python modules and built-in Rust modules
+## Modules of this catalogue and built-in modules
 
 | | Built-in modules (`flow`, `files`, `agent`…) | Modules in this catalogue |
 |---|---|---|
-| Written in | Rust, linked into the `regulus` binary | Python, with the official SDK |
+| Written in | Rust, linked into the `regulus` binary | Python with the official SDK, or Rust with the official helper |
 | Comes with | Regulus itself | a clone of this repository |
 | Runs | inside the core | as a separate process per project |
 | Needs a trusted project | no | **yes** |
 | What they can use of the core | all of it (`ModuleCtx`) | `emit` only: "then" ports, no "uses" ports |
-| Add or change one | edit Regulus and rebuild | install, edit `run.py`, `project reload` |
+| Add or change one | edit Regulus and rebuild `regulus` | install; edit it; (Rust: `node build`;) `project reload` |
 
-A Python module cannot replace a built-in one; it adds node types next to them.
+A module of this catalogue cannot replace a built-in one; it adds node types next to
+them. A Rust module here is **not** linked into Regulus: it is a separate program, like a
+Python one, and Regulus is never rebuilt for it.
 
 ## Write and share your own
 
 For a node only you need, `regulus node init <project> --id <id>` writes one straight
 into your project. To share it here, so anyone can install it with one command, follow
-[CONTRIBUTING.md](CONTRIBUTING.md): copy `template/`, write the node, add tests and a
-README, run `python3 catalog.py check`, add a row above and open a pull request.
+[CONTRIBUTING.md](CONTRIBUTING.md): copy `template/` (Python) or start from
+`regulus node init --lang rust` (Rust), write the node, add tests and a README, run
+`python3 catalog.py check`, add a row above and open a pull request.
 
 ## Repository layout
 
 ```
 catalog.py               list · show · install · remove · check (Python 3.11+, stdlib only)
-catalog.toml             the vendored SDK's version, sha256 and origin
+catalog.toml             the vendored SDKs' version, sha256 and origin
 sdk/regulus.py           the official Regulus Python SDK 0.2.1, unchanged (see NOTICE)
-modules/<id>/            one folder per module: module.toml, run.py, README.md, tests/
-template/                a starter module to copy
+sdk/regulus.rs           the official Regulus Rust helper of 0.2.1, unchanged (see NOTICE)
+modules/<id>/            one folder per module: module.toml, README.md, and
+                           Python: run.py, tests/
+                           Rust:   Cargo.toml, Cargo.lock, regulus-module.toml, src/
+template/                a starter Python module to copy
 tests/                   tests of catalog.py, and the real-core check (REGULUS_BIN)
 ```
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). `sdk/regulus.py` is the Regulus Python SDK, also
-Apache-2.0, copied from the Regulus repository; see [NOTICE](NOTICE).
+Apache-2.0, see [LICENSE](LICENSE). `sdk/regulus.py` and `sdk/regulus.rs` are the Regulus
+Python SDK and Rust helper, also Apache-2.0, copied from the Regulus repository; see
+[NOTICE](NOTICE).

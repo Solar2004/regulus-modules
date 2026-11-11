@@ -9,4 +9,12 @@ the Regulus repository:
   commit 229ffdda7fbaa2d2298a00192ca4a8587d09c4dd, file sdk/python/regulus.py
   sha256 254039b2204f72f3fa29e98592abad161ce312c4a9e2ef7b69e9fa80cb9b34ac
 Copyright the Regulus authors, licensed under the Apache License, Version 2.0.
-`python3 catalog.py install` copies it into each installed module's folder.
+`python3 catalog.py install` copies it into each installed Python module's folder.
+
+It includes the Regulus Rust helper, sdk/regulus.rs, of Regulus 0.2.1, copied unchanged
+from the Regulus repository:
+  https://github.com/Solar2004/Regulus
+  commit e20e20b3209a68d9bc2f37db9e7ddb4a32361b86, file sdk/rust/regulus.rs
+  sha256 a995b56316401e1cf3a89940196d3766cfef0359a55b50d29be7b4956d8643f3
+Copyright the Regulus authors, licensed under the Apache License, Version 2.0.
+`python3 catalog.py install` copies it into each installed Rust module, as src/regulus.rs.

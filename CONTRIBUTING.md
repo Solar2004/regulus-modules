@@ -1,8 +1,10 @@
 # Contributing a module
 
-A module here is one Regulus local module written in Python with the official SDK, that
-anyone can install with `python3 catalog.py install <id> --project <folder>`. Adding one
-is a pull request with one new folder and one new README row.
+A module here is one Regulus local module, written in Python with the official SDK or in
+Rust with the official helper, that anyone can install with
+`python3 catalog.py install <id> --project <folder>`. Adding one is a pull request with
+one new folder and one new README row. Steps 1 to 5 are for a Python module;
+[a Rust module](#a-rust-module) differs in steps 1 to 4.
 
 What Regulus expects of a local module (the protocol, trust, reload, ports that depend
 on the config) is in the Regulus docs:
@@ -111,6 +113,61 @@ top-level [README.md](README.md) with the same id and version (`check` looks for
 Commit with a [Conventional Commits](https://www.conventionalcommits.org/) message such
 as `feat(modules): add my-tool`, and open a pull request. CI runs `catalog.py check` and
 every test folder on Python 3.11 and the latest Python 3.
+
+## A Rust module
+
+Use Rust when the module is better off as a compiled program; it is still a local module
+(a separate process that only has `emit`), never part of the `regulus` binary. What the
+helper does and does not do is in the Regulus docs,
+[`sdk/rust/README.md`](https://github.com/Solar2004/Regulus/blob/master/sdk/rust/README.md);
+[`modules/scrapling`](modules/scrapling) is one to read.
+
+**1. Start from `regulus node init`**, in a throwaway project, and move the crate here:
+
+```sh
+mkdir -p /tmp/try && regulus project open /tmp/try
+regulus node init /tmp/try --id my-tool --lang rust
+mkdir modules/my-tool && cp -r /tmp/try/tools/my-tool/. modules/my-tool/
+rm modules/my-tool/src/regulus.rs
+ln -s ../../../sdk/regulus.rs modules/my-tool/src/regulus.rs
+cp template/module.toml modules/my-tool/module.toml
+```
+
+The link is how the crate reaches the catalogue's one copy of the helper, so `cargo test`
+works in this clone; install writes the real file in its place. In `module.toml` set the
+values as for a Python module and add `lang = "rust"`.
+
+**2. Write the nodes.** Node types, ports and fields are declared in
+`regulus-module.toml`; `src/main.rs` registers a handler per type.
+
+- **Keep the names `regulus node build` expects:** the package in `Cargo.toml` is
+  `node-<id>`, with the module's version and an empty `[workspace]` table.
+- **Dependencies are the user's risk and wait:** each one is downloaded and compiled on
+  their machine. `serde_json` is enough for most modules; add another only when writing
+  it yourself would be worse, and say so in the README. Commit `Cargo.lock`.
+- **Stdout belongs to the protocol.** Log with `eprintln!`; give every child process its
+  own stdin and stdout (`Stdio::null()` or `Stdio::piped()`).
+- **The core does not apply field defaults** to a Rust module: read each field with the
+  default the manifest shows.
+- **Say what it touches**, as for a Python module.
+
+**3. Test it** with `cargo test` in the module's folder (also `cargo clippy --all-targets`
+and `cargo fmt`), in `src/` (a `src/tests.rs` is fine). Drive the node through
+`Module::serve` as the example does, and stand in for anything outside the process (a
+command, a server) so the tests need no network. Then try it in a real project:
+
+```sh
+python3 catalog.py install my-tool --project /tmp/try   # after step 4, in a fresh project
+regulus project trust /tmp/try
+regulus node build /tmp/try --id my-tool
+regulus project reload try --module my-tool
+```
+
+**4. List its files and checksums** as in step 4 above, with paths: `Cargo.toml`,
+`Cargo.lock`, `regulus-module.toml`, `.gitignore` and everything under `src/` except
+`src/regulus.rs`, which install adds. Never list anything in `target/`.
+
+Step 5 is the same. CI runs `cargo test` in every module that has a `Cargo.toml`.
 
 ## Changing a published module
 
