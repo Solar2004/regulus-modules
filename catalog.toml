@@ -1,0 +1,11 @@
+# The regulus-modules catalogue. Each module lives in modules/<id>/ with its module.toml;
+# `python3 catalog.py check` verifies them all.
+
+# One copy of the official Regulus Python SDK (standard library only), installed beside
+# every module's run.py as regulus.py. Copied unchanged from the Regulus repository at the
+# commit below; Apache-2.0, see NOTICE. To update it, see AGENTS.md.
+[sdk]
+version = "0.2.1"
+sha256 = "254039b2204f72f3fa29e98592abad161ce312c4a9e2ef7b69e9fa80cb9b34ac"
+origin = "https://github.com/Solar2004/Regulus/blob/229ffdda7fbaa2d2298a00192ca4a8587d09c4dd/sdk/python/regulus.py"
+license = "Apache-2.0"
