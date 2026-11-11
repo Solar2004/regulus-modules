@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.x"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Check manifests, checksums and the README catalogue
+        run: python catalog.py check
+      - name: Test the catalogue tool, every module and the template
+        run: |
+          for dir in tests modules/*/tests template/tests; do
+            python -W error::ResourceWarning -m unittest discover -s "$dir" -v || exit 1
+          done
