@@ -3,12 +3,14 @@ core runs it (a process speaking the protocol over stdin/stdout, with the SDK be
 
 Run: python3 -m unittest discover -s modules/text-extract/tests
 """
+import contextlib
 import importlib.util
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -146,12 +148,57 @@ class Protocol(unittest.TestCase):
         shutil.rmtree(self.folder)
 
     def converse(self, requests):
-        lines = "".join(json.dumps({"jsonrpc": "2.0", **r}) + "\n" for r in requests)
-        done = subprocess.run([sys.executable, str(self.folder / "run.py")],
-                              input=lines.encode(), capture_output=True, timeout=30,
-                              cwd=self.folder)
-        self.assertEqual(done.returncode, 0, done.stderr.decode())
-        return [json.loads(line) for line in done.stdout.decode().splitlines() if line]
+        """Sends `requests` the way the core does and returns every line the module wrote.
+
+        The core asks for the manifest, then starts the module, then sends calls (several
+        may be in flight at once) and waits for each call's answer before it stops the
+        module. Each stage here waits for the answers of the one before: the module answers
+        `stop` at once and exits, so a `stop` sent while events are still on its worker
+        threads would lose them. The module's stderr goes to a file, read only on failure.
+        """
+        stages = [[r for r in requests if r["method"] == method]
+                  for method in ("manifest", "start", "call", "stop")]
+        self.assertEqual(sum(map(len, stages)), len(requests), "unknown request method")
+        stderr = tempfile.TemporaryFile()
+
+        def problem(what):
+            stderr.seek(0)
+            return f"{what}; stderr:\n{stderr.read().decode(errors='replace')}"
+
+        process = subprocess.Popen([sys.executable, str(self.folder / "run.py")],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=stderr, cwd=self.folder)
+        watchdog = threading.Timer(30, process.kill)
+        watchdog.start()
+        replies = []
+        try:
+            for stage in stages:
+                for request in stage:
+                    line = json.dumps({"jsonrpc": "2.0", **request}) + "\n"
+                    process.stdin.write(line.encode())
+                process.stdin.flush()
+                wanted = {request["id"] for request in stage}
+                while wanted:
+                    text = process.stdout.readline().decode()
+                    if not text:
+                        self.fail(problem(f"the module closed stdout before answering {wanted}"))
+                    if text.strip():
+                        replies.append(json.loads(text))
+                        wanted.discard(replies[-1].get("id"))
+            process.stdin.close()
+            replies += [json.loads(text) for text in process.stdout.read().decode().splitlines()
+                        if text.strip()]
+            if process.wait() != 0:
+                self.fail(problem(f"the module exited with {process.returncode}"))
+        finally:
+            watchdog.cancel()
+            process.kill()
+            process.wait()
+            with contextlib.suppress(OSError):
+                process.stdin.close()
+            process.stdout.close()
+            stderr.close()
+        return replies
 
     @staticmethod
     def event(request_id, node_type, config, value):
