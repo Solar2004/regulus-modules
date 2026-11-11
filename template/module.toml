@@ -1,0 +1,14 @@
+# A module of the regulus-modules catalogue; `python3 catalog.py check` verifies it.
+# Copy this folder to modules/<id>/ and set every value below (CONTRIBUTING.md).
+id = "my-module"
+name = "My module"
+version = "0.1.0"
+summary = "One line on what it does."
+license = "Apache-2.0"
+tested_with = "0.2.1"
+
+# What is installed into tools/<id>/ of a project, besides the SDK (regulus.py).
+# `python3 catalog.py check` prints the right sha256 when a file changes.
+[[file]]
+path = "run.py"
+sha256 = "cc4ae39d555f6d668c8196e1c68b4c878b0265c2f2b1d061b91ebbbed01f2173"

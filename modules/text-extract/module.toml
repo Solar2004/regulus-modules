@@ -1,0 +1,12 @@
+# A module of the regulus-modules catalogue; `python3 catalog.py check` verifies it.
+id = "text-extract"
+name = "Text extract"
+version = "0.1.0"
+summary = "Pull JSON values and fenced code blocks out of text, such as an agent's reply."
+license = "Apache-2.0"
+tested_with = "0.2.1"
+
+# What is installed into tools/<id>/ of a project, besides the SDK (regulus.py).
+[[file]]
+path = "run.py"
+sha256 = "96c37803d144b1c4f04e25162879953fc1f9b1180f0d65252e958f59db3c6f06"
